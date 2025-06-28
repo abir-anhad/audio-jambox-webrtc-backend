@@ -1,0 +1,13 @@
+{
+    "name": "audio-jambox-backend",
+    "version": "1.0.0",
+    "description": "Signaling server for Audio JamBox",
+    "main": "src/server.js",
+    "scripts": {
+      "start": "node src/server.js"
+    },
+    "dependencies": {
+      "express": "^4.19.2",
+      "socket.io": "^4.7.5"
+    }
+  }
