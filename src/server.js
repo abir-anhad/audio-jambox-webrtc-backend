@@ -2,6 +2,8 @@
 ================================================================================
 File: /audio-jambox/backend/src/server.js
 ================================================================================
+This version fixes the "Cannot consume" bug by only sending a list of
+peers who have active producers to new joiners.
 */
 const express = require('express');
 const http = require('http');
@@ -10,6 +12,7 @@ const { Server } = require("socket.io");
 const mediasoup = require('mediasoup');
 const fs = require('fs');
 const config = require('./config');
+const Room = require('./Room');
 
 const app = express();
 let httpsServer;
@@ -20,22 +23,22 @@ process.on('uncaughtException', (err) => {
     console.error(err.stack);
 });
 
-if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+// Use HTTPS if certificates are provided (for production/staging)
+if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' || fs.existsSync('/home/ubuntu/certs/privkey.pem')) {
     console.log('Running in secure mode (HTTPS)');
     try {
         const key = fs.readFileSync('/home/ubuntu/certs/privkey.pem');
         const cert = fs.readFileSync('/home/ubuntu/certs/fullchain.pem');
         httpsServer = https.createServer({ key, cert }, app);
     } catch (e) {
-        console.error("SSL Certificate error: Make sure cert.key and cert.crt are present in ./config", e);
-   
+        console.error("SSL Certificate error. Could not read certificate files.", e);
+        process.exit(1); // Exit if certs are expected but not found/readable
     }
 } else {
     console.log('Running in development mode (HTTP)');
     httpsServer = http.createServer(app);
 }
 
-// Configure Socket.IO with CORS settings to allow connections from our frontend
 const io = new Server(httpsServer, {
     cors: {
         origin: "*", // In production, restrict this to your frontend's URL
@@ -43,11 +46,9 @@ const io = new Server(httpsServer, {
     }
 });
 
-// In-memory store for rooms
 const rooms = new Map();
 
 (async () => {
-    // --- 1. Create Mediasoup Workers ---
     const workers = [];
     for (let i = 0; i < config.mediasoup.numWorkers; ++i) {
         const worker = await mediasoup.createWorker({
@@ -63,7 +64,6 @@ const rooms = new Map();
         workers.push(worker);
     }
 
-    // --- 2. Handle Socket.IO connections ---
     let nextWorkerIndex = 0;
     io.on('connection', (socket) => {
         console.log(`Client connected: ${socket.id}`);
@@ -76,7 +76,6 @@ const rooms = new Map();
             }
         });
 
-        // --- Signaling Handlers ---
         socket.on('getRouterRtpCapabilities', (data, callback) => {
             const room = rooms.get(data.roomId);
             if (room) {
@@ -92,8 +91,13 @@ const rooms = new Map();
                 room = await Room.create({ worker, roomId: data.roomId, io });
                 rooms.set(data.roomId, room);
             }
+            
+            // FIX: Get the list of peers with producers *before* adding the new peer.
+            const producerPeerIds = room.getProducerPeerIds();
             room.addPeer(socket);
-            callback({ peerIds: room.getPeerIds() });
+            
+            // FIX: Send back the list of peers that are already producing.
+            callback({ peerIds: producerPeerIds });
         });
 
         socket.on('createWebRtcTransport', async (data, callback) => {
@@ -150,7 +154,6 @@ const rooms = new Map();
         });
     });
 
-    // --- Start Server ---
     httpsServer.listen(config.listenPort, config.listenIp, () => {
         console.log(`Server listening on ${config.listenIp}:${config.listenPort}`);
     });
