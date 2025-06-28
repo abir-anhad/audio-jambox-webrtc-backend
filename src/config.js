@@ -38,7 +38,7 @@ module.exports = {
             listenIps: [
                 {
                     ip: '0.0.0.0',
-                    announcedIp: null, // Let mediasoup figure it out
+                    announcedIp: '3.7.98.21', // Let mediasoup figure it out
                 }
             ],
             enableUdp: true,
