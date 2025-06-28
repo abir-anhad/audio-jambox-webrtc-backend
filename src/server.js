@@ -2,7 +2,7 @@
 ================================================================================
 File: /audio-jambox/backend/src/server.js
 ================================================================================
-This version has been instrumented with extensive logging.
+This version is refactored to correctly use the new config structure.
 */
 const express = require('express');
 const http = require('http');
@@ -10,28 +10,28 @@ const https = require('https');
 const { Server } = require("socket.io");
 const mediasoup = require('mediasoup');
 const fs = require('fs');
-const config = require('./config');
+const config = require('./config'); // Load the new config
 const Room = require('./Room');
 
 const app = express();
 let httpsServer;
 
 const log = (msg) => console.log(`[SERVER] ${new Date().toISOString()} - ${msg}`);
-const error = (msg, err) => console.error(`[SERVER-ERROR] ${new Date().toISOString()} - ${msg}`, err);
-
+const errorLog = (msg, err) => console.error(`[SERVER-ERROR] ${new Date().toISOString()} - ${msg}`, err);
 
 process.on('uncaughtException', (err) => {
-    error('FATAL Uncaught Exception:', err);
+    errorLog('FATAL Uncaught Exception:', err);
 });
 
-if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging' || fs.existsSync('/home/ubuntu/certs/privkey.pem')) {
+// Use HTTPS if certificates are provided (for production/staging)
+if ((process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') && fs.existsSync('/home/ubuntu/certs/privkey.pem')) {
     log('Attempting to run in secure mode (HTTPS)');
     try {
         const key = fs.readFileSync('/home/ubuntu/certs/privkey.pem');
         const cert = fs.readFileSync('/home/ubuntu/certs/fullchain.pem');
         httpsServer = https.createServer({ key, cert }, app);
     } catch (e) {
-        error("SSL Certificate error. Could not read certificate files.", e);
+        errorLog("SSL Certificate error. Could not read certificate files.", e);
         process.exit(1);
     }
 } else {
@@ -44,14 +44,13 @@ const rooms = new Map();
 
 (async () => {
     const workers = [];
+    // Use numWorkers from the new config
     for (let i = 0; i < config.mediasoup.numWorkers; ++i) {
         const worker = await mediasoup.createWorker({
-            logLevel: config.mediasoup.workerSettings.logLevel,
-            logTags: config.mediasoup.workerSettings.logTags,
-            rtcMinPort: config.mediasoup.workerSettings.rtcMinPort,
-            rtcMaxPort: config.mediasoup.workerSettings.rtcMaxPort,
+            // Use workerSettings from the new config
+            ...config.mediasoup.workerSettings
         });
-        worker.on('died', () => error(`mediasoup worker ${worker.pid} has died`));
+        worker.on('died', () => errorLog(`mediasoup worker ${worker.pid} has died`));
         workers.push(worker);
         log(`Mediasoup worker created [pid:${worker.pid}]`);
     }
@@ -73,9 +72,6 @@ const rooms = new Map();
             const room = rooms.get(data.roomId);
             if (room) {
                 callback(room.router.rtpCapabilities);
-            } else {
-                error(`Room ${data.roomId} not found for getRouterRtpCapabilities`);
-                callback(null);
             }
         });
 
@@ -102,14 +98,8 @@ const rooms = new Map();
             log(`>> [${socket.id}] requested to create WebRtcTransport`);
             const room = rooms.get(data.roomId);
             if (room) {
-                try {
-                    const { params } = await room.createWebRtcTransport(socket.id);
-                    log(`<< [${socket.id}] WebRtcTransport created [id:${params.id}]`);
-                    callback(params);
-                } catch (err) {
-                    error(`Failed to create transport for peer [${socket.id}]`, err);
-                    callback({ error: err.message });
-                }
+                const { params } = await room.createWebRtcTransport(socket.id);
+                callback(params);
             }
         });
 
@@ -117,12 +107,7 @@ const rooms = new Map();
             log(`>> [${socket.id}] requested to connect transport [id:${data.transportId}]`);
             const room = rooms.get(data.roomId);
             if (room) {
-                await room.connectWebRtcTransport({
-                    peerId: socket.id,
-                    transportId: data.transportId,
-                    dtlsParameters: data.dtlsParameters
-                });
-                log(`<< [${socket.id}] Transport connected [id:${data.transportId}]`);
+                await room.connectWebRtcTransport({ peerId: socket.id, transportId: data.transportId, dtlsParameters: data.dtlsParameters });
                 callback();
             }
         });
@@ -131,13 +116,7 @@ const rooms = new Map();
             log(`>> [${socket.id}] requested to produce [kind:${data.kind}] on transport [id:${data.transportId}]`);
             const room = rooms.get(data.roomId);
             if (room) {
-                const producer = await room.createProducer({
-                    peerId: socket.id,
-                    transportId: data.transportId,
-                    rtpParameters: data.rtpParameters,
-                    kind: data.kind
-                });
-                log(`<< [${socket.id}] Producer created [id:${producer.id}]`);
+                const producer = await room.createProducer({ peerId: socket.id, transportId: data.transportId, rtpParameters: data.rtpParameters, kind: data.kind });
                 callback({ id: producer.id });
             }
         });
@@ -146,14 +125,7 @@ const rooms = new Map();
             log(`>> [${socket.id}] requested to consume from peer [${data.producerPeerId}]`);
             const room = rooms.get(data.roomId);
             if (room) {
-                 const result = await room.createConsumer({
-                    peerId: socket.id,
-                    producerPeerId: data.producerPeerId,
-                    rtpCapabilities: data.rtpCapabilities
-                });
-                if (result) {
-                    log(`<< [${socket.id}] Consumer created [id:${result.params.id}] for producer of [${data.producerPeerId}]`);
-                }
+                 const result = await room.createConsumer({ peerId: socket.id, producerPeerId: data.producerPeerId, rtpCapabilities: data.rtpCapabilities });
                 callback(result);
             }
         });
@@ -163,7 +135,6 @@ const rooms = new Map();
             const room = rooms.get(data.roomId);
             if (room) {
                 await room.resumeConsumer({ peerId: socket.id, consumerId: data.consumerId });
-                log(`<< [${socket.id}] Consumer resumed [id:${data.consumerId}]`);
                 callback();
             }
         });

@@ -2,8 +2,7 @@
 ================================================================================
 File: /audio-jambox/backend/src/Room.js
 ================================================================================
-This version has been instrumented with extensive logging and fixes the logic
-for finding the correct consumer transport.
+This version is refactored to correctly use the new config structure.
 */
 const config = require('./config');
 
@@ -20,6 +19,7 @@ class Room {
 
     static async create({ worker, roomId, io }) {
         const room = new Room({ roomId, worker, io });
+        // Use router mediaCodecs from the new config
         room.router = await worker.createRouter({ mediaCodecs: config.mediasoup.router.mediaCodecs });
         room.log('Router created');
         return room;
@@ -51,9 +51,10 @@ class Room {
 
     async createWebRtcTransport(peerId) {
         this.log(`Creating transport for peer [${peerId}]`);
+        // Use webRtcTransport settings from the new config
         const transport = await this.router.createWebRtcTransport({
             ...config.mediasoup.webRtcTransport,
-            appData: { peerId } // Store peerId for easier debugging
+            appData: { peerId }
         });
         this.peers.get(peerId).transports.set(transport.id, transport);
         this.log(`Transport CREATED [id:${transport.id}] for peer [${peerId}]`);
@@ -61,15 +62,12 @@ class Room {
     }
     
     async connectWebRtcTransport({ peerId, transportId, dtlsParameters }) {
-        this.log(`Connecting transport [id:${transportId}] for peer [${peerId}]`);
         const transport = this.peers.get(peerId)?.transports.get(transportId);
         if (!transport) throw new Error(`Transport ${transportId} not found for peer ${peerId}`);
         await transport.connect({ dtlsParameters });
-        this.log(`Transport CONNECTED [id:${transportId}]`);
     }
     
     async createProducer({ peerId, transportId, rtpParameters, kind }) {
-        this.log(`Creating producer for peer [${peerId}] on transport [${transportId}]`);
         const transport = this.peers.get(peerId)?.transports.get(transportId);
         if (!transport) throw new Error(`Transport ${transportId} not found for peer ${peerId}`);
         const producer = await transport.produce({ kind, rtpParameters, appData: { peerId } });
@@ -80,46 +78,26 @@ class Room {
     }
 
     async createConsumer({ peerId, producerPeerId, rtpCapabilities }) {
-        this.log(`Creating consumer for peer [${peerId}] to consume from [${producerPeerId}]`);
         const producer = this.getProducerFromPeer(producerPeerId);
-        if (!producer) {
-            this.error(`Producer not found for peer [${producerPeerId}]`);
-            return null;
-        }
+        if (!producer) return null;
         if (!this.router.canConsume({ producerId: producer.id, rtpCapabilities })) {
             this.error(`Peer [${peerId}] cannot consume producer [${producer.id}]`);
             return null;
         }
         
         const consumerTransport = this.findRecvTransport(peerId);
-        if (!consumerTransport) {
-            this.error(`No suitable RECV transport found for peer [${peerId}]`);
-            return null;
-        }
+        if (!consumerTransport) return null;
 
-        this.log(`Found RECV transport [id:${consumerTransport.id}] for consumer`);
-        const consumer = await consumerTransport.consume({ 
-            producerId: producer.id, 
-            rtpCapabilities, 
-            paused: true 
-        });
-        
+        const consumer = await consumerTransport.consume({ producerId: producer.id, rtpCapabilities, paused: true });
         this.peers.get(peerId).consumers.set(consumer.id, consumer);
         
-        consumer.on('transportclose', () => {
-            this.log(`Consumer's transport closed [id:${consumer.id}]`);
-            this.peers.get(peerId)?.consumers.delete(consumer.id);
-        });
-        consumer.on('producerclose', () => {
-            this.log(`Consumer's producer closed [id:${consumer.id}]`);
-            this.peers.get(peerId)?.consumers.delete(consumer.id);
-        });
-        this.log(`Consumer CREATED [id:${consumer.id}]`);
+        consumer.on('transportclose', () => this.peers.get(peerId)?.consumers.delete(consumer.id));
+        consumer.on('producerclose', () => this.peers.get(peerId)?.consumers.delete(consumer.id));
+        
         return { params: { id: consumer.id, producerId: producer.id, kind: consumer.kind, rtpParameters: consumer.rtpParameters } };
     }
     
     async resumeConsumer({ peerId, consumerId }) {
-        this.log(`Resuming consumer [id:${consumerId}] for peer [${peerId}]`);
         const consumer = this.peers.get(peerId)?.consumers.get(consumerId);
         if (consumer) await consumer.resume();
     }
@@ -131,7 +109,6 @@ class Room {
         peer.transports.forEach(transport => transport.close());
         this.peers.delete(peerId);
         this.io.to(this.id).emit('peer-closed', { peerId });
-        this.log(`Peer REMOVED [id:${peerId}]`);
     }
     
     getProducerFromPeer(peerId) {
@@ -139,22 +116,15 @@ class Room {
         return producers ? producers.values().next().value : null;
     }
     
-    // Correctly finds the transport that is NOT being used to send media.
     findRecvTransport(peerId) {
         const peer = this.peers.get(peerId);
         if (!peer) return null;
-
-        const sendTransportIds = new Set();
-        for (const producer of peer.producers.values()) {
-            sendTransportIds.add(producer.transportId);
-        }
-        
+        const sendTransportIds = new Set(Array.from(peer.producers.values()).map(p => p.transportId));
         for (const transport of peer.transports.values()) {
             if (!sendTransportIds.has(transport.id)) {
                 return transport;
             }
         }
-        this.error(`Could not find a RECV transport for peer [${peerId}]`);
         return null;
     }
 }
